@@ -8,6 +8,12 @@
 #include "vm.h"
 
 uint64
+sys_sysclcnt(void)
+{
+  return syscalls_counter;
+}
+
+uint64
 sys_exit(void)
 {
   int n;
