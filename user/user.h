@@ -30,7 +30,6 @@ int uptime(void);
 int sysclcnt(void);
 int ptree(int pid, struct proc_tree *pt);
 
-
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);
@@ -53,3 +52,8 @@ void printf(const char*, ...) __attribute__ ((format (printf, 1, 2)));
 // umalloc.c
 void* malloc(uint);
 void free(void*);
+
+// sleep wrapper
+static inline int sleep(int n) {
+    return pause(n);
+}

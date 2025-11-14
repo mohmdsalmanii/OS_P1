@@ -314,7 +314,7 @@ reparent(struct proc *p)
 
   for(pp = proc; pp < &proc[NPROC]; pp++){
     if(pp->parent == p){
-      pp->parent = initproc;
+      pp->parent = p->parent;
       wakeup(initproc);
     }
   }

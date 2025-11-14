@@ -145,7 +145,7 @@ UPROGS=\
 	$U/_dorphan\
         $U/_sysclcnt_test\
         $U/_ptree_test\
-
+        $U/_reparent_test\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
