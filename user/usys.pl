@@ -44,3 +44,4 @@ entry("pause");
 entry("uptime");
 entry("sysclcnt");
 entry("ptree");
+entry("chpnice");

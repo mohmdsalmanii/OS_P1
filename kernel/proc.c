@@ -26,6 +26,145 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
+// CFS parameters in ticks (1 tick ~= 100ms with current clockintr()).
+#define NICE_0_WEIGHT 1024
+#define CFS_TARGET_LATENCY_TICKS 5
+#define CFS_MIN_GRANULARITY_TICKS 1
+
+static int
+nice_to_weight(int nice)
+{
+  int weight = NICE_0_WEIGHT;
+  int i;
+
+  if(nice > 19)
+    nice = 19;
+  if(nice < -20)
+    nice = -20;
+
+  if(nice > 0){
+    for(i = 0; i < nice; i++)
+      weight = (weight * 100) / 125;
+  } else if(nice < 0){
+    for(i = 0; i < -nice; i++)
+      weight = (weight * 125) / 100;
+  }
+
+  if(weight < 1)
+    weight = 1;
+  return weight;
+}
+
+int
+kchpnice(int pid, int nice)
+{
+  struct proc *p;
+
+  if(pid <= 0)
+    return -1;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->pid == pid && p->state != UNUSED){
+      p->nice = nice;
+      p->weight = nice_to_weight(nice);
+      p->slice_ticks = 0;
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+
+  return -1;
+}
+
+static uint64
+cfs_now_ticks(void)
+{
+  uint64 now;
+
+  acquire(&tickslock);
+  now = ticks;
+  release(&tickslock);
+  return now;
+}
+
+static void
+cfs_account_runtime(struct proc *p)
+{
+  uint64 now, delta, scaled;
+
+  if(p == 0)
+    return;
+
+  now = cfs_now_ticks();
+  if(p->last_run_tick == 0){
+    p->last_run_tick = now;
+    return;
+  }
+
+  delta = now - p->last_run_tick;
+  if(delta == 0)
+    return;
+
+  p->last_run_tick = now;
+  scaled = (delta * NICE_0_WEIGHT) / p->weight;
+  if(scaled == 0)
+    scaled = 1;
+  p->vruntime += scaled;
+}
+
+static uint64
+cfs_timeslice_ticks(struct proc *p)
+{
+  struct proc *q;
+  uint64 total_weight = p->weight;
+  uint64 ideal;
+
+  for(q = proc; q < &proc[NPROC]; q++){
+    if(q == p)
+      continue;
+    acquire(&q->lock);
+    if(q->state == RUNNABLE)
+      total_weight += q->weight;
+    release(&q->lock);
+  }
+
+  if(total_weight == 0)
+    total_weight = 1;
+
+  ideal = (CFS_TARGET_LATENCY_TICKS * p->weight) / total_weight;
+  if(ideal < CFS_MIN_GRANULARITY_TICKS)
+    ideal = CFS_MIN_GRANULARITY_TICKS;
+  return ideal;
+}
+
+static void
+cfs_on_pick(struct proc *p)
+{
+  uint64 now = cfs_now_ticks();
+
+  p->slice_ticks = cfs_timeslice_ticks(p);
+  if(p->slice_ticks == 0)
+    p->slice_ticks = CFS_MIN_GRANULARITY_TICKS;
+  p->slice_start_tick = now;
+  p->last_run_tick = now;
+}
+
+int
+cfs_should_yield(struct proc *p)
+{
+  uint64 now;
+
+  if(p == 0)
+    return 0;
+  if(p->slice_ticks == 0)
+    return 1;
+
+  now = cfs_now_ticks();
+  return (now - p->slice_start_tick) >= p->slice_ticks;
+}
+
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
@@ -124,6 +263,12 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->nice = 0;
+  p->weight = nice_to_weight(p->nice);
+  p->vruntime = 0;
+  p->last_run_tick = 0;
+  p->slice_start_tick = 0;
+  p->slice_ticks = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +314,12 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->nice = 0;
+  p->weight = 0;
+  p->vruntime = 0;
+  p->last_run_tick = 0;
+  p->slice_start_tick = 0;
+  p->slice_ticks = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -281,6 +432,12 @@ kfork(void)
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
+  np->nice = p->nice;
+  np->weight = p->weight;
+  np->vruntime = p->vruntime;
+  np->last_run_tick = 0;
+  np->slice_start_tick = 0;
+  np->slice_ticks = 0;
 
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
@@ -425,6 +582,8 @@ void
 scheduler(void)
 {
   struct proc *p;
+  struct proc *best;
+  uint64 best_vruntime;
   struct cpu *c = mycpu();
 
   c->proc = 0;
@@ -437,28 +596,44 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
+    best = 0;
+    best_vruntime = 0;
+    for(p = proc; p < &proc[NPROC]; p++){
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      if(p->state == RUNNABLE){
+        if(best == 0 || p->vruntime < best_vruntime){
+          best = p;
+          best_vruntime = p->vruntime;
+        }
       }
       release(&p->lock);
     }
-    if(found == 0) {
+
+    if(best == 0){
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
+      continue;
     }
+
+    acquire(&best->lock);
+    if(best->state != RUNNABLE){
+      release(&best->lock);
+      continue;
+    }
+
+    // Switch to chosen process. It is the process's job
+    // to release its lock and then reacquire it
+    // before jumping back to us.
+    p = best;
+    p->state = RUNNING;
+    c->proc = p;
+    cfs_on_pick(p);
+    swtch(&c->context, &p->context);
+
+    // Process is done running for now.
+    // It should have changed its p->state before coming back.
+    c->proc = 0;
+    release(&p->lock);
   }
 }
 
@@ -495,6 +670,7 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+  cfs_account_runtime(p);
   p->state = RUNNABLE;
   sched();
   release(&p->lock);
@@ -553,6 +729,8 @@ sleep(void *chan, struct spinlock *lk)
 
   acquire(&p->lock);  //DOC: sleeplock1
   release(lk);
+
+  cfs_account_runtime(p);
 
   // Go to sleep.
   p->chan = chan;

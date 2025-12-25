@@ -14,6 +14,17 @@ sys_sysclcnt(void)
 }
 
 uint64
+sys_chpnice(void)
+{
+  int pid;
+  int nice;
+
+  argint(0, &pid);
+  argint(1, &nice);
+  return kchpnice(pid, nice);
+}
+
+uint64
 sys_exit(void)
 {
   int n;

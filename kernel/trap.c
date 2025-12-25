@@ -80,8 +80,8 @@ usertrap(void)
   if(killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  // give up the CPU if this is a timer interrupt and the slice expired.
+  if(which_dev == 2 && cfs_should_yield(p))
     yield();
 
   prepare_return();
@@ -151,8 +151,8 @@ kerneltrap()
     panic("kerneltrap");
   }
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
+  // give up the CPU if this is a timer interrupt and the slice expired.
+  if(which_dev == 2 && myproc() != 0 && cfs_should_yield(myproc()))
     yield();
 
   // the yield() may have caused some traps to occur,

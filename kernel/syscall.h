@@ -22,4 +22,5 @@
 #define SYS_close  21
 #define SYS_sysclcnt 22
 #define SYS_ptree  23
+#define SYS_chpnice 24
 

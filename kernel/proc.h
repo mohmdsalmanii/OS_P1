@@ -108,5 +108,13 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // CFS scheduling fields.
+  int nice;                    // Nice value (-20..19)
+  int weight;                  // Scheduling weight derived from nice
+  uint64 vruntime;             // Virtual runtime
+  uint64 last_run_tick;        // Last tick we accounted runtime
+  uint64 slice_start_tick;     // Tick when current slice started
+  uint64 slice_ticks;          // Slice length in ticks
 };
 

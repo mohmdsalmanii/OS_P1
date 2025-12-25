@@ -29,6 +29,7 @@ int pause(int);
 int uptime(void);
 int sysclcnt(void);
 int ptree(int pid, struct proc_tree *pt);
+int chpnice(int pid, int nice);
 
 // ulib.c
 int stat(const char*, struct stat*);
